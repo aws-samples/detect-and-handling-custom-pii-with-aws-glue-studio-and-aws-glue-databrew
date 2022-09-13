@@ -1,0 +1,678 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Sample solution to automatically detect PII in CSV files uploaded to S3 using Glue sensitive data detection feature and encrypt the columns by Glue Databrew with a secret.'
+
+Parameters:
+  SecretString:
+    Type: String
+    Description: Enter a secret string that will be base64 encoded to use for hashing the PII data.  
+  
+Resources:
+  # Step functions state machine
+  StateMachinePIITask:
+    Type: 'AWS::StepFunctions::StateMachine'
+    DependsOn: RoleStepFunctionsPIITask
+    Properties:
+      StateMachineName: !Sub "${AWS::StackName}-StateMachinePIITask"
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Automatically detect PII columns of data files loaded into S3 and reproduce the data files with PII columns encrypted.",
+              "StartAt": "Create Glue DataBrew Dataset",
+              "States": {
+                "Create Glue DataBrew Dataset": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "Input": {
+                      "S3InputDefinition": {
+                        "Bucket.$": "$.bucket.name",
+                        "Key.$": "$.object.key"
+                      }
+                    },
+                    "FormatOptions": {
+                      "Csv": {
+                        "Delimiter": ";"
+                      }
+                    },
+                    "Name.$": "$.object.key"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createDataset",
+                  "Next": "Execute Glue Job to detect PII",
+                  "InputPath": "$.detail",
+                  "ResultPath": "$.DataBrewDatasetResult"
+                },
+                "Execute Glue Job to detect PII": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                  "Parameters": {
+                    "JobName": "${GlueJobPIIdetection}",
+                    "Arguments": {
+                      "--RANDOM.$": "$.id",
+                      "--BUCKET_SOURCE.$": "$.detail.bucket.name",
+                      "--KEY_SOURCE.$": "$.detail.object.key",
+                      "--BUCKET_DEST": "${GlueDataBrewOutputBucketName}"
+                    }
+                  },
+                  "Next": "Lambda Invoke",
+                  "InputPath": "$",
+                  "ResultPath": "$.GlueJobResult"
+                },
+                "Lambda Invoke": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::lambda:invoke",
+                  "Parameters": {
+                    "Payload": {
+                      "bucket_dest": "${GlueDataBrewOutputBucketName}",
+                      "path.$": "$.id"
+                    },
+                    "FunctionName": "${FunctionGlueDataBrewProfileReader.Arn}"
+                  },
+                  "Retry": [
+                    {
+                      "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                      ],
+                      "IntervalSeconds": 2,
+                      "MaxAttempts": 6,
+                      "BackoffRate": 2
+                    }
+                  ],
+                  "Next": "Validate if the Dataset Contains PII Columns",
+                  "ResultPath": "$.LambdaTaskResult",
+                  "ResultSelector": {
+                    "PIIColumns.$": "$.Payload"
+                  }
+                },
+                "Validate if the Dataset Contains PII Columns": {
+                  "Type": "Choice",
+                  "Choices": [
+                    {
+                      "Variable": "$.LambdaTaskResult.PIIColumns",
+                      "StringEquals": "No PII columns found.",
+                      "Next": "No PII Data is Found"
+                    }
+                  ],
+                  "Default": "Create Glue DataBrew PII Data Encryption Recipe"
+                },
+                "No PII Data is Found": {
+                  "Type": "Succeed"
+                },
+                "Create Glue DataBrew PII Data Encryption Recipe": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "Name.$": "States.Format('{}-PII-Encryption-Recipe',$.DataBrewDatasetResult.Name)",
+                    "Steps": [
+                      {
+                        "Action": {
+                          "Operation": "CRYPTOGRAPHIC_HASH",
+                          "Parameters": {
+                            "secretId": "${GlueDataBrewPIITaskSecretArn}",
+                            "sourceColumns.$": "$.LambdaTaskResult.PIIColumns"
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createRecipe",
+                  "Next": "Create Glue DataBrew Project",
+                  "ResultPath": "$.Recipe"
+                },
+                "Create Glue DataBrew Project": {
+                  "Type": "Task",
+                  "Next": "Create Glue DataBrew Recipe Job",
+                  "Parameters": {
+                    "DatasetName.$": "$.DataBrewDatasetResult.Name",
+                    "Name.$": "States.Format('{}-PII-Project',$.DataBrewDatasetResult.Name)",
+                    "RecipeName.$": "$.Recipe.Name",
+                    "RoleArn": "${RoleGlueDataBrewPIITask.Arn}"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createProject",
+                  "ResultPath": "$.Project"
+                },
+                "Create Glue DataBrew Recipe Job": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "ProjectName.$": "$.Project.Name",
+                    "Outputs": [
+                      {
+                        "Location": {
+                          "Bucket": "${GlueDataBrewOutputBucketName}"
+                        }
+                      }
+                    ],
+                    "Name.$": "States.Format('{}-PII-Encryption-Job',$.DataBrewDatasetResult.Name)",
+                    "RoleArn": "${RoleGlueDataBrewPIITask.Arn}"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createRecipeJob",
+                  "Next": "Start Glue DataBrew Recipe Job"
+                },
+                "Start Glue DataBrew Recipe Job": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::databrew:startJobRun.sync",
+                  "Parameters": {
+                    "Name.$": "$.Name"
+                  },
+                  "Next": "Successfully Encryption PII Data"
+                },
+                "Successfully Encryption PII Data": {
+                  "Type": "Succeed"
+                }
+              }
+            }
+          - {GlueDataBrewOutputBucketName: !Ref 'BucketGlueDataBrewPIIDataOutput', GlueDataBrewPIITaskSecretArn: !Ref 'SecretGlueDataBrewPIITask'}
+      RoleArn: !GetAtt 'RoleStepFunctionsPIITask.Arn'
+
+  #Custom resource to create Glue Job code file
+  GlueJobCodeCustomResource:
+    Type: "Custom::GlueJobCode"
+    Properties:
+      ServiceToken: !GetAtt GlueJobCodeFunction.Arn
+      Bucket: !Ref BucketGlueJob
+      StackName_: !Ref AWS::StackName
+
+  #Function to create Glue Job code file
+  GlueJobCodeFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import random
+          import string
+          import cfnresponse
+          import boto3
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+            logger.info(event)
+            bucket = event['ResourceProperties']['Bucket']
+            stack = event['ResourceProperties']['StackName_']
+            
+            s3 = boto3.resource('s3')
+
+            if event['RequestType'] == 'Delete':
+              
+              s3.Object(bucket,f'{stack}-GlueDetectPIIJob.py').delete()
+              
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+            
+            if event['RequestType'] == 'Create':
+              
+              code = """import sys
+          from awsglue.transforms import *
+          from awsglue.utils import getResolvedOptions
+          from pyspark.context import SparkContext
+          from awsglue.context import GlueContext
+          from awsglue.job import Job
+          from awsglueml.transforms import EntityDetector
+          from pyspark.sql.types import MapType, StringType, StructType, StructField
+          from awsglue.dynamicframe import DynamicFrame
+
+          args = getResolvedOptions(sys.argv, ["JOB_NAME","RANDOM","BUCKET_SOURCE","KEY_SOURCE","BUCKET_DEST"])
+
+          sc = SparkContext()
+          glueContext = GlueContext(sc)
+          spark = glueContext.spark_session
+          job = Job(glueContext)
+          job.init(args["JOB_NAME"], args)
+
+          source = f's3://{args["BUCKET_SOURCE"]}/{args["KEY_SOURCE"]}'
+
+          # Script generated for node Amazon S3
+          AmazonS3_node1656699502100 = glueContext.create_dynamic_frame.from_options(
+              format_options={"withHeader": True, "separator": ";", "optimizePerformance": False},
+              connection_type="s3",
+              format="csv",
+              connection_options={"paths": [source]},
+              transformation_ctx="AmazonS3_node1656699502100",
+          )
+
+          # Script generated for node Detect PII
+          entity_detector = EntityDetector()
+          classified_map = entity_detector.classify_columns(
+              AmazonS3_node1656699502100, ["demo_CEP", "demo_CNPJ", "demo_CPF", "demo_RG", "demo_Telefone"], 0.1, 0.5
+          )
+          items = classified_map.items()
+          schema = StructType(
+              [
+                  StructField("columnName", StringType(), True),
+                  StructField(
+                      "entityTypes", StructType([StructField("entityType", StringType(), True)])
+                  ),
+              ]
+          )
+          data_frame = spark.createDataFrame(data=items, schema=schema)
+          DetectPII_node1657029151097 = DynamicFrame.fromDF(data_frame, glueContext, "df_for_pii")
+
+          # Script generated for node Amazon S3
+          AmazonS3_node1657029218467 = glueContext.write_dynamic_frame.from_options(
+              frame=DetectPII_node1657029151097,
+              connection_type="s3",
+              format="json",
+              connection_options={
+                  "path": "s3://"+ args["BUCKET_DEST"] + "/"+ args["RANDOM"] + "/",
+                  "partitionKeys": [],
+              },
+              transformation_ctx="AmazonS3_node1657029218467",
+          )
+
+          job.commit()"""
+
+              s3.Object(bucket,f'{stack}-GlueDetectPIIJob.py').put(Body=code)
+              
+              responseData = {}
+              
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)                
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt 'RoleLambdaGlueJobCode.Arn'
+      Runtime: 'python3.9'
+
+  #Glue jobs
+  GlueJobPIIdetection:
+    Type: 'AWS::Glue::Job'
+    Properties:
+      Command:
+        Name:  glueetl
+        ScriptLocation: #"s3://aws-teste/glue-detect-pii-job.py" #!Ref GlueJobS3File
+          !Sub "s3://${BucketGlueJob}/${AWS::StackName}-GlueDetectPIIJob.py"
+      DefaultArguments:
+        "--job-bookmark-option": "job-bookmark-enable"
+      GlueVersion: '3.0'
+      MaxRetries: 1
+      MaxCapacity: 2
+      Name: !Sub "${AWS::StackName}-GlueDetectPIIJob"
+      Role: !Ref GlueJobRole
+
+  #Glue Sensitive data detection Custom Resource
+  GlueSensitiveDataDetectionCustomResource:
+    Type: "Custom::GlueCustomEntityType"
+    Properties:
+      ServiceToken: !GetAtt GlueSensitiveDataDetectionFunction.Arn
+
+  #Glue Sensitive data detection Function
+  GlueSensitiveDataDetectionFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        ZipFile: |
+          import random
+          import string
+          import cfnresponse
+          import sys
+          from pip._internal import main
+
+          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+
+          import boto3
+          from botocore.exceptions import ClientError
+          
+          def lambda_handler(event, context):
+            print(boto3.__version__)
+            if event['RequestType'] == 'Delete':
+              client = boto3.client('glue')
+
+              response = client.delete_custom_entity_type(Name='demo_Telefone')
+              response = client.delete_custom_entity_type(Name='demo_RG')
+              response = client.delete_custom_entity_type(Name='demo_CPF')
+              response = client.delete_custom_entity_type(Name='demo_CNPJ')
+              response = client.delete_custom_entity_type(Name='demo_CEP')
+              
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              return
+            
+            if event['RequestType'] == 'Create':
+              client = boto3.client('glue')
+
+              response_telefone = client.create_custom_entity_type(Name='demo_Telefone', RegexString='(\(?\d{2}\)?\s?)?(9?\d{4}\-?\d{4})')
+              response_rg = client.create_custom_entity_type(Name='demo_RG', RegexString='(^\d{1,2}).?(\d{3}).?(\d{3,4})(-\d{1}|X|x$)')
+              response_cpf = client.create_custom_entity_type(Name='demo_CPF', RegexString='(^\d{3}\.\d{3}\.\d{3}\-\d{2}$)')
+              response_cnpj = client.create_custom_entity_type(Name='demo_CNPJ', RegexString='(^\d{2}\.\d{3}\.\d{3}\/\d{4}\-\d{2}$)')
+              response_cep = client.create_custom_entity_type(Name='demo_CEP', RegexString='(^[0-9]{5})-?([0-9]{3}$)')
+              
+              responseData = {}
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+                        
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt 'RoleLambdaGlueDataBrewProfileReader.Arn'
+      Runtime: 'python3.9'
+
+  # Lambda functions
+  FunctionGlueDataBrewProfileReader:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def lambda_handler(event, context):
+            s3Bucket = event["bucket_dest"]
+            s3Path =  event["path"]
+            
+            print(f'bucket: {s3Bucket} ; path: {s3Path}')
+            conn = boto3.client('s3')
+            s3resource = boto3.resource('s3')
+            
+            PIIColumnsList = []
+            for key in conn.list_objects_v2(Bucket=s3Bucket, Prefix=s3Path).get("Contents"):
+                #print(key['Key'])
+                if key['Size'] > 0:
+                  s3ObjKey = key['Key']
+                  glueJobResultFileIterator = s3resource.Object(s3Bucket, s3ObjKey).get()['Body'].iter_lines()
+                  for line in glueJobResultFileIterator:
+                    #print(line.decode("utf-8"))
+                    glueJobResult = json.loads(line.decode("utf-8"))
+                    print(glueJobResult["columnName"])
+                    PIIColumnsList.append(glueJobResult["columnName"])
+                    
+            if PIIColumnsList == []:
+              return 'No PII columns found.'
+            else:
+              return PIIColumnsList
+      Handler: 'index.lambda_handler'
+      Role: !GetAtt 'RoleLambdaGlueDataBrewProfileReader.Arn'
+      Runtime: 'python3.9'
+      Timeout: 10
+
+  # S3 Buckets
+  BucketGlueJob:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub
+          - 'demo-glue-encryption-pii-code-${RandomGUID}'
+          - {RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  BucketGlueDataBrewPIIDataInput:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub
+          - 'demo-glue-encryption-pii-data-input-${RandomGUID}'
+          - {RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]}
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+  BucketGlueDataBrewPIIDataOutput:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        !Sub
+          - 'demo-glue-encryption-pii-data-output-${RandomGUID}'
+          - {RandomGUID: !Select [0, !Split ["-", !Select [2, !Split ["/", !Ref AWS::StackId]]]]}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # EventBridge Rule
+  EventBridgeRuleNewDataArrival:
+    Type: 'AWS::Events::Rule'
+    Properties:
+      Description: Listen to object creation and update events inside the S3 bucket for data input.
+      EventBusName: default
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        detail:
+          bucket:
+            name:
+            - !Ref 'BucketGlueDataBrewPIIDataInput'
+      Targets:
+        - Arn: !GetAtt 'StateMachinePIITask.Arn'
+          Id: NewDataArrivalForPIITask
+          RoleArn: !GetAtt 'RoleEventBridgePIITask.Arn'
+
+  # Secrets Manager Secret
+  SecretGlueDataBrewPIITask:
+    Type: 'AWS::SecretsManager::Secret'
+    Properties:
+      Name: !Sub "${AWS::StackName}-GlueDataBrewPIITaskSecret"
+      Description: "Dynamically generate a secret for Glue DataBrew."
+      SecretString:
+        Fn::Base64:
+          !Ref SecretString
+
+  # IAM roles
+  RoleLambdaGlueJobCode:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: LambdaS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:PutObjectAcl
+            Resource:
+            - !GetAtt 'BucketGlueJob.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueJob.Arn'
+                  - /*
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole' 
+  GlueJobRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'glue.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: GlueS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:PutObjectAcl
+            Resource:
+            - !GetAtt 'BucketGlueJob.Arn' #- "arn:aws:s3:::demo-aws-etl/" #replace!
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueJob.Arn'
+                  - !Sub "/${AWS::StackName}-GlueDetectPIIJob.py"
+            
+            - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+                  - /*   
+            - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*      
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole'
+  RoleStepFunctionsPIITask:
+    Type: 'AWS::IAM::Role'
+    DependsOn: GlueJobPIIdetection
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'states.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: InvokeFunctionGlueDataBrewProfileReader
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 'lambda:InvokeFunction'
+            Resource:
+            - !GetAtt 'FunctionGlueDataBrewProfileReader.Arn'
+      - PolicyName: RunGlueJobSensitiveDataDetection
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action: 
+            - 'glue:StartJobRun'
+            - 'glue:GetJobRun'
+            Resource: 
+            - !Sub arn:${AWS::Partition}:glue:${AWS::Region}:${AWS::AccountId}:job/${GlueJobPIIdetection}
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/AwsGlueDataBrewFullAccessPolicy'
+  RoleGlueDataBrewPIITask:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'databrew.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: DataBrewS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:ListBucket
+            - s3:PutObjectAcl
+            Resource:
+            - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+                  - /*   
+            - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*
+      - PolicyName: GetGlueDataBrewPIITaskSecret
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'secretsmanager:GetResourcePolicy'
+            - 'secretsmanager:GetSecretValue'
+            - 'secretsmanager:DescribeSecret'
+            - 'secretsmanager:ListSecretVersionIds'
+            Resource:
+            - !Ref 'SecretGlueDataBrewPIITask'
+          - Effect: Allow
+            Action: 'secretsmanager:ListSecrets'
+            Resource: '*'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSGlueDataBrewServiceRole'
+  RoleLambdaGlueDataBrewProfileReader:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: GlueCreateDeleteCustomEntityType
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'glue:CreateCustomEntityType'
+            - 'glue:DeleteCustomEntityType'
+            Resource: '*'
+      - PolicyName: DataBrewS3BucketsAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 's3:GetObject'
+            - 's3:ListBucket'
+            Resource:
+            - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*    
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+  RoleEventBridgePIITask:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'events.amazonaws.com'
+          Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: StepFunctionsStateMachine-PII-Task-Trigger
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'states:StartExecution'
+            Resource:
+              - !GetAtt 'StateMachinePIITask.Arn'
+
+Outputs:
+  AmazonS3BucketForGlueDataBrewDataInput:
+    Value: !Sub https://s3.console.aws.amazon.com/s3/buckets/${BucketGlueDataBrewPIIDataInput}?region=${AWS::Region}
+  AWSStepFunctionsStateMachine:
+    Value: !Sub https://console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${StateMachinePIITask}
