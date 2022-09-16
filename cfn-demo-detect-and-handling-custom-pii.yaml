@@ -22,29 +22,8 @@ Resources:
           - |-
             {
               "Comment": "Automatically detect PII columns of data files loaded into S3 and reproduce the data files with PII columns encrypted.",
-              "StartAt": "Create Glue DataBrew Dataset",
+              "StartAt": "Execute Glue Job to detect PII",
               "States": {
-                "Create Glue DataBrew Dataset": {
-                  "Type": "Task",
-                  "Parameters": {
-                    "Input": {
-                      "S3InputDefinition": {
-                        "Bucket.$": "$.bucket.name",
-                        "Key.$": "$.object.key"
-                      }
-                    },
-                    "FormatOptions": {
-                      "Csv": {
-                        "Delimiter": ";"
-                      }
-                    },
-                    "Name.$": "$.object.key"
-                  },
-                  "Resource": "arn:aws:states:::aws-sdk:databrew:createDataset",
-                  "Next": "Execute Glue Job to detect PII",
-                  "InputPath": "$.detail",
-                  "ResultPath": "$.DataBrewDatasetResult"
-                },
                 "Execute Glue Job to detect PII": {
                   "Type": "Task",
                   "Resource": "arn:aws:states:::glue:startJobRun.sync",
@@ -95,13 +74,46 @@ Resources:
                     {
                       "Variable": "$.LambdaTaskResult.PIIColumns",
                       "StringEquals": "No PII columns found.",
-                      "Next": "No PII Data is Found"
+                      "Next": "CopyObject"
                     }
                   ],
-                  "Default": "Create Glue DataBrew PII Data Encryption Recipe"
+                  "Default": "Create Glue DataBrew Dataset"
+                },
+                "CopyObject": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "ServerSideEncryption": "AES256",
+                    "CopySource.$": "States.Format('{}/{}',$.bucket.name,$.object.key)",
+                    "Bucket": "${GlueDataBrewOutputBucketName}",
+                    "Key.$": "$.object.key"
+                  },
+                  "InputPath": "$.detail",
+                  "Next": "No PII Data is Found",
+                  "Resource": "arn:aws:states:::aws-sdk:s3:copyObject"
                 },
                 "No PII Data is Found": {
                   "Type": "Succeed"
+                },
+                "Create Glue DataBrew Dataset": {
+                  "Type": "Task",
+                  "Parameters": {
+                    "Input": {
+                      "S3InputDefinition": {
+                        "Bucket.$": "$.bucket.name",
+                        "Key.$": "$.object.key"
+                      }
+                    },
+                    "FormatOptions": {
+                      "Csv": {
+                        "Delimiter": ";"
+                      }
+                    },
+                    "Name.$": "$.object.key"
+                  },
+                  "Resource": "arn:aws:states:::aws-sdk:databrew:createDataset",
+                  "Next": "Create Glue DataBrew PII Data Encryption Recipe",
+                  "InputPath": "$.detail",
+                  "ResultPath": "$.DataBrewDatasetResult"
                 },
                 "Create Glue DataBrew PII Data Encryption Recipe": {
                   "Type": "Task",
@@ -142,8 +154,10 @@ Resources:
                     "Outputs": [
                       {
                         "Location": {
-                          "Bucket": "${GlueDataBrewOutputBucketName}"
-                        }
+                          "Bucket": "${GlueDataBrewOutputBucketName}",
+                          "Key": "$.object.key"
+                        },
+                        "Overwrite": true
                       }
                     ],
                     "Name.$": "States.Format('{}-PII-Encryption-Job',$.DataBrewDatasetResult.Name)",
@@ -282,7 +296,7 @@ Resources:
     Properties:
       Command:
         Name:  glueetl
-        ScriptLocation: #"s3://aws-teste/glue-detect-pii-job.py" #!Ref GlueJobS3File
+        ScriptLocation:
           !Sub "s3://${BucketGlueJob}/${AWS::StackName}-GlueDetectPIIJob.py"
       DefaultArguments:
         "--job-bookmark-option": "job-bookmark-enable"
@@ -521,7 +535,7 @@ Resources:
             - s3:ListBucket
             - s3:PutObjectAcl
             Resource:
-            - !GetAtt 'BucketGlueJob.Arn' #- "arn:aws:s3:::demo-aws-etl/" #replace!
+            - !GetAtt 'BucketGlueJob.Arn'
             - !Join
                 - ''
                 - - !GetAtt 'BucketGlueJob.Arn'
@@ -551,6 +565,24 @@ Resources:
             Service: 'states.amazonaws.com'
           Action: 'sts:AssumeRole'
       Policies:
+      - PolicyName: StepFunctionsS3BucketAccess
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:GetObject
+            - s3:PutObject
+            - s3:DeleteObject
+            - s3:PutObjectAcl
+            Resource:
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataInput.Arn'
+                  - /*
+            - !Join
+                - ''
+                - - !GetAtt 'BucketGlueDataBrewPIIDataOutput.Arn'
+                  - /*
       - PolicyName: InvokeFunctionGlueDataBrewProfileReader
         PolicyDocument:
           Statement:
@@ -672,7 +704,10 @@ Resources:
               - !GetAtt 'StateMachinePIITask.Arn'
 
 Outputs:
-  AmazonS3BucketForGlueDataBrewDataInput:
+  AmazonS3BucketForDataInput:
     Value: !Sub https://s3.console.aws.amazon.com/s3/buckets/${BucketGlueDataBrewPIIDataInput}?region=${AWS::Region}
+  AmazonS3BucketForDataOuput:
+    Value: !Sub https://s3.console.aws.amazon.com/s3/buckets/${BucketGlueDataBrewPIIDataOutput}?region=${AWS::Region}
   AWSStepFunctionsStateMachine:
     Value: !Sub https://console.aws.amazon.com/states/home?region=${AWS::Region}#/statemachines/view/${StateMachinePIITask}
+  
