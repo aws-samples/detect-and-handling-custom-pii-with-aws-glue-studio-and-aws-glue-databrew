@@ -2,7 +2,7 @@
 
 ![alt text](images/sensitive-data-detection-architecture.png "Architecture")
 
-This repository provides an [AWS CloudFormation](https://aws.amazon.com/cloudformation/) (CFn) template that builds sample a data pipeline, with the functionality of identifying personal and sensitive data using the Sensitive Data Detection feature of [AWS Glue Studio](https://docs.aws.amazon.com/glue/latest/ug/what-is-glue-studio.html) and apply hashing algorithm to protect columns identified with the use of [AWS Glue DataBrew](https://aws.amazon.com/glue/features/databrew/), through an event-oriented and [serverless](https://aws.amazon.com/serverless/) architecture.
+This repository provides an [AWS CloudFormation](https://aws.amazon.com/cloudformation/) (CFn) template that builds sample a data pipeline, with the functionality of identifying personal and sensitive data using the Sensitive Data Detection feature of [AWS Glue Studio](https://docs.aws.amazon.com/glue/latest/ug/what-is-glue-studio.html) and apply hashing algorithm to protect columns identified with the use of [AWS Glue DataBrew](https://aws.amazon.com/glue/features/databrew/), through an event-driven and [serverless](https://aws.amazon.com/serverless/) architecture.
 
 **Note:** Although the data contained in the [sample file](sample-synthetic-PII-ptbr.csv) respects the real format, they are fictious data generated randomly, respecting the rules for creating each document.
 The misuse of the data generated here is the sole responsibility of the user.
