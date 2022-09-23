@@ -6,12 +6,20 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: 'Sample solution to automatically detect sensitive data in CSV files uploaded to S3 using Glue Sensitive Data Detection feature and hashing the columns by Glue Databrew with a secret.'
 
 Parameters:
+  GlueSamplePortion:
+    Type: Number
+    Description: Enter the percentage of rows to sample, between 0.01 and 1. For example, if you enter 0.1, you are specifying that you want scan only 10 percent of rows looking for sensitive data. 
+    Default: 0.1
+  GlueDetectionThreshold:
+    Type: Number
+    Description: Enter the percentage of rows that contain the sensitive data to be identified, between 0.01 and 1. For example, if you enter 0.5, you are specifying that 50 percent or more of the rows scanned must be identified as sensitive data, otherwise field will not be labeled as having the sensitive data.
+    Default: 0.5
   SecretString:
     Type: String
     Description: Enter a secret string that will be used to hashing sensitive data
   1CustomSensitiveDataName:
     Type: String
-    Description: Enter a unique custom pattern name for the 1st parameter.
+    Description: Enter a unique custom pattern name for the 1st parameter. Use only alphanumeric characters and "_", do not use "-" or blank space. 
     Default: demo_CEP
   1CustomSensitiveDataValue:
     Type: String
@@ -19,7 +27,7 @@ Parameters:
     Default: (^[0-9]{5})-?([0-9]{3}$)
   2CustomSensitiveDataName:
     Type: String
-    Description: Enter a unique custom pattern name for the 2nd parameter.
+    Description: Enter a unique custom pattern name for the 2nd parameter. Use only alphanumeric characters and "_", do not use "-" or blank space. 
     Default: demo_CNPJ
   2CustomSensitiveDataValue:
     Type: String
@@ -27,7 +35,7 @@ Parameters:
     Default: (^\d{2}\.\d{3}\.\d{3}\/\d{4}\-\d{2}$)
   3CustomSensitiveDataName:
     Type: String
-    Description: Enter a unique custom pattern name for the 3th parameter.
+    Description: Enter a unique custom pattern name for the 3th parameter. Use only alphanumeric characters and "_", do not use "-" or blank space. 
     Default: demo_CPF
   3CustomSensitiveDataValue:
     Type: String
@@ -35,7 +43,7 @@ Parameters:
     Default: (^\d{3}\.\d{3}\.\d{3}\-\d{2}$)
   4CustomSensitiveDataName:
     Type: String
-    Description: Enter a unique custom pattern name for the 4th parameter.
+    Description: Enter a unique custom pattern name for the 4th parameter. Use only alphanumeric characters and "_", do not use "-" or blank space. 
     Default: demo_Telefone
   4CustomSensitiveDataValue:
     Type: String
@@ -43,7 +51,7 @@ Parameters:
     Default: (\(?\d{2}\)?\s?)?(9?\d{4}\-?\d{4})
   5CustomSensitiveDataName:
     Type: String
-    Description: Enter a unique custom pattern name for the 5th parameter.
+    Description: Enter a unique custom pattern name for the 5th parameter. Use only alphanumeric characters and "_", do not use "-" or blank space. 
     Default: demo_RG
   5CustomSensitiveDataValue:
     Type: String
@@ -305,7 +313,7 @@ Resources:
               # Script generated for node Detect SensitiveData
               entity_detector = EntityDetector()
               classified_map = entity_detector.classify_columns(
-                  AmazonS3_node1656699502100, ["${1CustomSensitiveDataName}", "${2CustomSensitiveDataName}", "${3CustomSensitiveDataName}", "${5CustomSensitiveDataName}", "${4CustomSensitiveDataName}"], 0.1, 0.5
+                  AmazonS3_node1656699502100, ["${1CustomSensitiveDataName}", "${2CustomSensitiveDataName}", "${3CustomSensitiveDataName}", "${5CustomSensitiveDataName}", "${4CustomSensitiveDataName}"], ${GlueSamplePortion}, ${GlueDetectionThreshold}
               )
               items = classified_map.items()
               schema = StructType(
@@ -342,7 +350,9 @@ Resources:
                2CustomSensitiveDataName: !Ref '2CustomSensitiveDataName',
                3CustomSensitiveDataName: !Ref '3CustomSensitiveDataName',
                4CustomSensitiveDataName: !Ref '4CustomSensitiveDataName',
-               5CustomSensitiveDataName: !Ref '5CustomSensitiveDataName'
+               5CustomSensitiveDataName: !Ref '5CustomSensitiveDataName',
+               GlueSamplePortion: !Ref 'GlueSamplePortion',
+               GlueDetectionThreshold: !Ref 'GlueDetectionThreshold'
               }
       Handler: 'index.lambda_handler'
       Role: !GetAtt 'RoleLambdaGlueJobCode.Arn'

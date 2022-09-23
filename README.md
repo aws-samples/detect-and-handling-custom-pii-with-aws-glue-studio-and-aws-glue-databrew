@@ -23,8 +23,8 @@ git clone git@github.com:aws-samples/detect-and-handling-custom-pii-with-aws-glu
 ```
 **Note**: Check AWS account and region before stack deploy.
 
-2. By default the CFn template provides 10 parameters filled, 5 custom sensitive data name (`1CustomSensitiveDataName`, `2CustomSensitiveDataName`, `3CustomSensitiveDataName`,
-`4CustomSensitiveDataName`, `5CustomSensitiveDataName`) and its respective regular expression (`1CustomSensitiveDataValue`,`2CustomSensitiveDataValue`,`3CustomSensitiveDataValue`,`4CustomSensitiveDataValue`,`5CustomSensitiveDataValue`) to detect some Personally Identifiable Information (PII) from Brazil (CPF, RG, CNPJ, CEP and Telefone) but you can edit if you prefer. 
+2. CFn template provides 12 parameters filled by default, 5 custom sensitive data name (`1CustomSensitiveDataName`, `2CustomSensitiveDataName`, `3CustomSensitiveDataName`,
+`4CustomSensitiveDataName`, `5CustomSensitiveDataName`), their respective regular expression (`1CustomSensitiveDataValue`,`2CustomSensitiveDataValue`,`3CustomSensitiveDataValue`,`4CustomSensitiveDataValue`,`5CustomSensitiveDataValue`) to detect some Personally Identifiable Information (PII) from Brazil (CPF, RG, CNPJ, CEP and Telefone), percentage of rows to sample (`GlueSamplePortion`) and percentage of rows that contain the sensitive data (`GlueDetectionThreshold`). You can edit these parameters if you prefer. 
 Provide a value for `SecretString` parameter, that will be base64 encoded as a secret (AWS Secrets Manager) and used for data hashing.
 
 ### Running data pipeline 
