@@ -86,7 +86,7 @@ Resources:
                   },
                   "Next": "Lambda Invoke",
                   "InputPath": "$",
-                  "ResultPath": "$.GlueJobResult"
+                  "ResultPath": "$.GlueJobResult",
                   "Retry": [
                     {
                       "ErrorEquals": [
