@@ -7,7 +7,7 @@ This repository provides an [AWS CloudFormation](https://aws.amazon.com/cloudfor
 ## Use Agreement
 
 We recommend that you use this template as a starting point for creating your own template, not for launching production-level environments. Before launching a template, always review the resources and policies that it will create and the permissions it requires. Using this code `I Agree` I'm solely responsible for any security issue caused due any misconfiguration and/or bugs. 
-Although the data contained in the [sample file](sample-synthetic-PII-ptbr.csv) respects the real format, they are fictious data generated randomly, respecting the rules for creating each document. The misuse of the data generated here is the sole responsibility of the user.
+Although the data contained in the [sample file](sample-synthetic-PII-ptbr.csv) respects the real format, they are fictitious data generated randomly, respecting the rules for creating each document. The misuse of the data generated here is the sole responsibility of the user.
 
 ## Instructions
 
